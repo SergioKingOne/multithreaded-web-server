@@ -1,27 +1,35 @@
 use std::{
     fs,
-    io::{prelude::*, BufReader},
+    io::{prelude::*, BufReader, Error},
     net::{TcpListener, TcpStream},
-    result, thread,
+    thread,
     time::Duration,
 };
 
 use hello::ThreadPool;
-fn main() {
-    let listener = TcpListener::bind("127.0.0.1:7878").unwrap();
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:7878")?;
     let pool = ThreadPool::new(4);
 
-    for stream in listener.incoming().take(2) {
-        let stream = stream.unwrap();
-        pool.execute(|| {
-            handle_connection(stream);
-        });
+    for stream in listener.incoming() {
+        let stream = stream?;
+        match pool.execute(move || {
+            if let Err(e) = handle_connection(stream) {
+                eprintln!("Error handling connection: {}", e);
+            }
+        }) {
+            Ok(_) => (),
+            Err(e) => eprintln!("Error executing task: {}", e),
+        }
     }
+
+    Ok(())
 }
 
-fn handle_connection(mut stream: TcpStream) {
+fn handle_connection(mut stream: TcpStream) -> Result<(), Error> {
     let buf_reader = BufReader::new(&mut stream);
-    let request_line = buf_reader.lines().next().unwrap().unwrap();
+    let request_line = buf_reader.lines().next().unwrap()?;
 
     let (status_line, filename) = match &request_line[..] {
         "GET / HTTP/1.1" => ("HTTP/1.1 200 OK", "hello.html"),
@@ -32,7 +40,7 @@ fn handle_connection(mut stream: TcpStream) {
         _ => ("HTTP/1.1 404 NOT FOUND", "404.html"),
     };
 
-    let contents = fs::read_to_string(filename).unwrap();
+    let contents = fs::read_to_string(filename)?;
     let length = contents.len();
 
     let response = format!(
@@ -40,5 +48,7 @@ fn handle_connection(mut stream: TcpStream) {
         status_line, length, contents
     );
 
-    stream.write_all(response.as_bytes()).unwrap();
+    stream.write_all(response.as_bytes())?;
+
+    Ok(())
 }
