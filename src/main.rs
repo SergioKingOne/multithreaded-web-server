@@ -1,6 +1,6 @@
 use std::{
-    fs,
-    io::{prelude::*, BufReader, Error},
+    fs::File,
+    io::{copy, prelude::*, BufReader, Error},
     net::{TcpListener, TcpStream},
     thread,
     time::Duration,
@@ -14,24 +14,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for stream in listener.incoming() {
         let stream = stream?;
-        match pool.execute(move || {
+        pool.execute(move || {
             if let Err(e) = handle_connection(stream) {
                 eprintln!("Error handling connection: {}", e);
             }
-        }) {
-            Ok(_) => (),
-            Err(e) => eprintln!("Error executing task: {}", e),
-        }
+        });
     }
 
     Ok(())
 }
 
 fn handle_connection(mut stream: TcpStream) -> Result<(), Error> {
-    let buf_reader = BufReader::new(&mut stream);
-    let request_line = buf_reader.lines().next().unwrap()?;
+    let mut buf_reader = BufReader::new(&stream);
+    let mut request_line = String::new();
+    buf_reader.read_line(&mut request_line)?;
 
-    let (status_line, filename) = match &request_line[..] {
+    let (status_line, filename) = match request_line.trim() {
         "GET / HTTP/1.1" => ("HTTP/1.1 200 OK", "hello.html"),
         "GET /sleep HTTP/1.1" => {
             thread::sleep(Duration::from_secs(5));
@@ -40,15 +38,23 @@ fn handle_connection(mut stream: TcpStream) -> Result<(), Error> {
         _ => ("HTTP/1.1 404 NOT FOUND", "404.html"),
     };
 
-    let contents = fs::read_to_string(filename)?;
-    let length = contents.len();
+    let mut file = File::open(filename)?;
+    let length = file.metadata()?.len();
 
-    let response = format!(
-        "{}\r\nContent-Length: {}\r\n\r\n{}",
-        status_line, length, contents
-    );
+    write_response(&mut stream, status_line, length, &mut file)?;
 
+    Ok(())
+}
+
+fn write_response(
+    stream: &mut TcpStream,
+    status_line: &str,
+    length: u64,
+    file: &mut File,
+) -> Result<(), Error> {
+    let mut response = format!("{}\r\nContent-Length: {}\r\n\r\n", status_line, length);
     stream.write_all(response.as_bytes())?;
+    copy(file, stream)?;
 
     Ok(())
 }

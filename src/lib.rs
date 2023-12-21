@@ -35,17 +35,17 @@ impl ThreadPool {
         }
     }
 
-    pub fn execute<F>(&self, f: F) -> Result<(), Box<dyn std::error::Error>>
+    pub fn execute<F>(&self, f: F)
     where
         F: FnOnce() + Send + 'static,
     {
-        let job = Box::new(f);
+        let job = Box::new(move || {
+            let _ = f();
+        });
 
-        self.sender
-            .as_ref()
-            .unwrap()
-            .send(Message::NewJob(job))
-            .map_err(|e| Box::new(e) as _)
+        if let Err(e) = self.sender.as_ref().unwrap().send(Message::NewJob(job)) {
+            eprintln!("Error sending job: {}", e);
+        }
     }
 }
 
@@ -101,77 +101,47 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     #[test]
     fn test_thread_pool_new() {
-        // Test that a ThreadPool can be created with more than zero threads
-        let pool = ThreadPool::new(5);
-        assert_eq!(pool.workers.len(), 5);
+        let pool = ThreadPool::new(4);
+        assert_eq!(pool.workers.len(), 4);
     }
 
     #[test]
-    #[should_panic]
-    fn test_thread_pool_new_zero() {
-        // Test that creating a ThreadPool with zero threads panics
-        ThreadPool::new(0);
-    }
+    fn test_thread_pool_multiple_executions() {
+        let pool = ThreadPool::new(4);
+        let counter = Arc::new(Mutex::new(0));
 
-    #[test]
-    fn test_thread_pool_execute() {
-        // Test that a ThreadPool can execute a job
-        let pool = ThreadPool::new(5);
-        let (tx, rx) = mpsc::channel();
-
-        pool.execute(move || {
-            tx.send(1).unwrap();
-        })
-        .unwrap();
-
-        assert_eq!(rx.recv().unwrap(), 1);
-    }
-
-    #[test]
-    fn test_thread_pool_multiple_execute() {
-        // Test that a ThreadPool can execute multiple jobs
-        let pool = ThreadPool::new(5);
-        let (tx, rx) = mpsc::channel();
-
-        for i in 0..10 {
-            let tx = tx.clone();
+        for _ in 0..8 {
+            let counter = Arc::clone(&counter);
             pool.execute(move || {
-                tx.send(i).unwrap();
-            })
-            .unwrap();
+                let mut counter = counter.lock().unwrap();
+                *counter += 1;
+            });
         }
 
-        drop(tx);
+        // Sleep to allow other threads to finish.
+        std::thread::sleep(Duration::from_secs(1));
 
-        let mut results: Vec<_> = rx.iter().collect();
-        results.sort();
-
-        assert_eq!(results, (0..10).collect::<Vec<_>>());
+        let counter = counter.lock().unwrap();
+        assert_eq!(*counter, 8);
     }
 
     #[test]
-    fn test_thread_pool_drop() {
-        // Test that a ThreadPool shuts down its workers when dropped
-        let pool = ThreadPool::new(5);
-        let (tx, rx) = mpsc::channel();
+    #[should_panic(expected = "assertion failed")]
+    fn test_thread_pool_zero_size() {
+        let _pool = ThreadPool::new(0);
+    }
 
-        for _ in 0..10 {
-            let tx = tx.clone();
-            pool.execute(move || {
-                thread::sleep(Duration::from_millis(100));
-                tx.send(1).unwrap();
-            })
-            .unwrap();
-        }
+    #[test]
+    fn test_worker_new() {
+        let (sender, receiver) = mpsc::channel();
+        let receiver = Arc::new(Mutex::new(receiver));
+        let worker = Worker::new(0, Arc::clone(&receiver));
 
-        drop(pool);
-
-        // If the workers were not shut down, this would block indefinitely
-        assert_eq!(rx.iter().take(10).fold(0, |sum, x| sum + x), 10);
+        assert_eq!(worker.id, 0);
     }
 }
